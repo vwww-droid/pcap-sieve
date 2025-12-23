@@ -198,6 +198,15 @@ class Sieve:
             dst_port = self._get_port(packet, 'dstport')
             protocol = packet.highest_layer
 
+            # Add remote dst IP to results (server IP)
+            if dst_ip and self._is_remote_ip(dst_ip):
+                self._add_ip_to_result(dst_ip, timestamp, src_ip, dst_ip,
+                                       src_port, dst_port, protocol, 'packet.dst')
+
+            # Extract remote domain from DNS/HTTP
+            self._extract_remote_domain(packet, timestamp, src_ip, dst_ip,
+                                       src_port, dst_port, protocol)
+
             # Extract payloads
             payloads = self.extractor.get_payload_from_packet(packet)
 
@@ -227,6 +236,39 @@ class Sieve:
                 if hasattr(layer, attr):
                     return getattr(layer, attr)
         return ''
+
+    def _extract_remote_domain(self, packet, timestamp: str, src_ip: str,
+                               dst_ip: str, src_port: str, dst_port: str,
+                               protocol: str):
+        """Extract domain from DNS query or HTTP Host"""
+        try:
+            # DNS query
+            if hasattr(packet, 'dns'):
+                dns_layer = packet.dns
+                if hasattr(dns_layer, 'qry_name'):
+                    domain = str(dns_layer.qry_name).lower().rstrip('.')
+                    if domain and self._is_valid_domain(domain):
+                        self.result.domains.add(domain)
+                        m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                                  protocol, 'domain', domain, 'dns.qry_name')
+                        self.result.matches.append(m)
+                        if self.print_output:
+                            print(f"[Domain] {domain} <- dns.qry_name")
+            
+            # HTTP Host
+            if hasattr(packet, 'http'):
+                http_layer = packet.http
+                if hasattr(http_layer, 'host'):
+                    host = str(http_layer.host).lower().rstrip('.')
+                    if host and self._is_valid_domain(host):
+                        self.result.domains.add(host)
+                        m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                                  protocol, 'domain', host, 'http.host')
+                        self.result.matches.append(m)
+                        if self.print_output:
+                            print(f"[Domain] {host} <- http.host")
+        except Exception:
+            pass
 
     def _extract_matches(self, content: str, timestamp: str, src_ip: str,
                          dst_ip: str, src_port: str, dst_port: str,
@@ -344,6 +386,42 @@ class Sieve:
                 return False
         
         return True
+
+    def _is_remote_ip(self, ip: str) -> bool:
+        """Check if IP is remote (not local/private)"""
+        try:
+            addr = ipaddress.ip_address(ip)
+            # Skip private, loopback, link-local, multicast
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                return False
+            if addr.is_multicast or addr.is_unspecified:
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _add_ip_to_result(self, ip: str, timestamp: str, src_ip: str,
+                          dst_ip: str, src_port: str, dst_port: str,
+                          protocol: str, field_name: str):
+        """Add IP to result set based on its type"""
+        try:
+            addr = ipaddress.ip_address(ip)
+            if isinstance(addr, ipaddress.IPv4Address):
+                self.result.ipv4.add(ip)
+                m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                          protocol, 'ipv4', ip, field_name)
+                self.result.matches.append(m)
+                if self.print_output:
+                    print(f"[IPv4] {ip} <- {field_name}")
+            else:  # IPv6
+                self.result.ipv6.add(ip)
+                m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                          protocol, 'ipv6', ip, field_name)
+                self.result.matches.append(m)
+                if self.print_output:
+                    print(f"[IPv6] {ip} <- {field_name}")
+        except Exception:
+            pass
 
     def save(self, output_path: str):
         """Save results to files"""
