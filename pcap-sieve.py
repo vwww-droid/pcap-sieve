@@ -65,6 +65,7 @@ class Result:
     ipv4: Set[str] = field(default_factory=set)
     ipv6: Set[str] = field(default_factory=set)
     domains: Set[str] = field(default_factory=set)
+    sensitive: dict = field(default_factory=lambda: defaultdict(set))
     matches: List[Match] = field(default_factory=list)
 
 
@@ -182,10 +183,39 @@ class PayloadExtractor:
 class Sieve:
     """Main extractor class"""
 
-    def __init__(self, print_output: bool = False):
+    def __init__(self, print_output: bool = False, regex_file: str = 'regexes.json'):
         self.result = Result()
         self.print_output = print_output
         self.extractor = PayloadExtractor()
+        self.custom_regexes = self._load_regexes(regex_file)
+
+    def _load_regexes(self, filepath: str) -> dict:
+        """Load custom regex patterns from JSON file"""
+        if not os.path.exists(filepath):
+            if self.print_output:
+                print(f"[!] Regex file not found: {filepath}", file=sys.stderr)
+            return {}
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                raw_patterns = json.load(f)
+            
+            compiled = {}
+            for name, pattern in raw_patterns.items():
+                try:
+                    if isinstance(pattern, list):
+                        compiled[name] = [re.compile(p, re.IGNORECASE) for p in pattern]
+                    else:
+                        compiled[name] = re.compile(pattern, re.IGNORECASE)
+                except re.error as e:
+                    if self.print_output:
+                        print(f"[!] Invalid regex for {name}: {e}", file=sys.stderr)
+            
+            return compiled
+        except Exception as e:
+            if self.print_output:
+                print(f"[!] Error loading regexes: {e}", file=sys.stderr)
+            return {}
 
     def process_packet(self, packet):
         """Process single packet"""
@@ -236,6 +266,34 @@ class Sieve:
                 if hasattr(layer, attr):
                     return getattr(layer, attr)
         return ''
+
+    def _clean_match_value(self, value: str) -> str:
+        """Clean and normalize matched value"""
+        # Strip whitespace
+        value = value.strip()
+        # Remove surrounding quotes
+        if len(value) >= 2 and value[0] in ('"', "'") and value[-1] in ('"', "'"):
+            value = value[1:-1]
+        return value
+
+    def _is_valid_match(self, value: str) -> bool:
+        """Check if matched value is valid (not binary garbage)"""
+        if not value or len(value) < 3:
+            return False
+        
+        # Count control characters
+        control_count = 0
+        for char in value:
+            code = ord(char)
+            # Control chars: 0-31 (except tab/newline/cr) and 127 (DEL)
+            if (code < 32 and char not in ('\t', '\n', '\r')) or code == 127:
+                control_count += 1
+        
+        # Reject if ANY control characters found (too strict for binary data)
+        if control_count > 0:
+            return False
+        
+        return True
 
     def _extract_remote_domain(self, packet, timestamp: str, src_ip: str,
                                dst_ip: str, src_port: str, dst_port: str,
@@ -306,6 +364,41 @@ class Sieve:
                 self.result.matches.append(m)
                 if self.print_output:
                     print(f"[Domain] {domain} <- {field_name}")
+
+        # Custom regex patterns
+        for pattern_name, pattern in self.custom_regexes.items():
+            if isinstance(pattern, list):
+                for p in pattern:
+                    for match in p.finditer(content):
+                        # Use group(1) if available (captures without quotes), else group()
+                        try:
+                            value = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group()
+                        except IndexError:
+                            value = match.group()
+                        
+                        value = self._clean_match_value(value)
+                        if value and self._is_valid_match(value):
+                            self.result.sensitive[pattern_name].add(value)
+                            m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                                      protocol, pattern_name, value, field_name)
+                            self.result.matches.append(m)
+                            if self.print_output:
+                                print(f"[{pattern_name}] {value} <- {field_name}")
+            else:
+                for match in pattern.finditer(content):
+                    try:
+                        value = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group()
+                    except IndexError:
+                        value = match.group()
+                    
+                    value = self._clean_match_value(value)
+                    if value and self._is_valid_match(value):
+                        self.result.sensitive[pattern_name].add(value)
+                        m = Match(timestamp, src_ip, dst_ip, src_port, dst_port,
+                                  protocol, pattern_name, value, field_name)
+                        self.result.matches.append(m)
+                        if self.print_output:
+                            print(f"[{pattern_name}] {value} <- {field_name}")
 
     def _is_valid_ipv4(self, ip: str) -> bool:
         """Validate IPv4 address"""
@@ -425,27 +518,34 @@ class Sieve:
 
     def save(self, output_path: str):
         """Save results to files"""
+        # Convert sensitive data to sorted lists
+        sensitive_data = {}
+        for pattern_name, values in self.result.sensitive.items():
+            sensitive_data[pattern_name] = sorted(values)
+        
         # Summary JSON
         summary = {
             'ipv4': sorted(self.result.ipv4),
             'ipv6': sorted(self.result.ipv6),
             'domains': sorted(self.result.domains),
+            **sensitive_data,
             'stats': {
                 'ipv4_count': len(self.result.ipv4),
                 'ipv6_count': len(self.result.ipv6),
                 'domain_count': len(self.result.domains),
+                'sensitive_patterns': len(self.result.sensitive),
                 'match_count': len(self.result.matches)
             }
         }
-        with open(output_path, 'w') as f:
-            json.dump(summary, f, indent=2)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
         print(f"[+] Summary saved to {output_path}")
 
         # Detail JSONL
         jsonl_path = output_path.rsplit('.', 1)[0] + '.jsonl'
-        with open(jsonl_path, 'w') as f:
+        with open(jsonl_path, 'w', encoding='utf-8') as f:
             for m in self.result.matches:
-                f.write(json.dumps(asdict(m)) + '\n')
+                f.write(json.dumps(asdict(m), ensure_ascii=False) + '\n')
         print(f"[+] Details saved to {jsonl_path}")
 
         # Print stats
@@ -453,7 +553,10 @@ class Sieve:
         print(f"IPv4:    {len(self.result.ipv4)}")
         print(f"IPv6:    {len(self.result.ipv6)}")
         print(f"Domains: {len(self.result.domains)}")
-        print(f"Matches: {len(self.result.matches)}")
+        for pattern_name, values in sorted(self.result.sensitive.items()):
+            if values:
+                print(f"{pattern_name}: {len(values)}")
+        print(f"Total Matches: {len(self.result.matches)}")
 
 
 def process_pcap(filepath: str, sieve: Sieve):
@@ -470,7 +573,7 @@ def process_pcap(filepath: str, sieve: Sieve):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Extract IPs and domains from pcap payload'
+        description='Extract IPs, domains and sensitive data from pcap payload'
     )
     parser.add_argument('-r', '--read', type=str, help='pcap file to process')
     parser.add_argument('-d', '--directory', type=str, 
@@ -479,13 +582,15 @@ def main():
                         help='output file path (default: sieve_result.json)')
     parser.add_argument('-p', '--print', action='store_true', dest='print_out',
                         help='print matches to stdout')
+    parser.add_argument('--regex', type=str, default='regexes.json',
+                        help='custom regex patterns file (default: regexes.json)')
     args = parser.parse_args()
 
     if not args.read and not args.directory:
         parser.print_help()
         sys.exit(1)
 
-    sieve = Sieve(print_output=args.print_out)
+    sieve = Sieve(print_output=args.print_out, regex_file=args.regex)
 
     if args.read:
         process_pcap(args.read, sieve)
