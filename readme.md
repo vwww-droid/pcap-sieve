@@ -109,32 +109,7 @@ python pcap-sieve.py -r capture.pcap --regex custom_patterns.json
 - MAC addresses, IP addresses
 - Passwords in URLs
 - CTF flags (HackerOne, HackTheBox, TryHackMe)
-
-### 待添加
-
-#### 设备指纹
-- **IMEI/IMSI**: 设备唯一标识 (15位数字)
-- **Android ID**: 系统生成的设备 ID (16位hex)
-- **MAC Address**: 网络接口物理地址
-- **Device Model**: 设备型号和厂商信息
-- **User-Agent**: 完整的 UA 字符串分析
-
-#### 个人信息
-- **手机号码**: 各国格式的电话号码 (+86, +1, etc.)
-- **邮箱地址**: Email 地址提取
-- **身份证号**: 中国身份证等证件号码
-- **银行卡号**: 信用卡/借记卡号码 (Luhn 校验)
-
-#### 地理位置
-- **GPS 坐标**: 经纬度信息 (lat/lng)
-- **IP 地理位置**: 结合 GeoIP 数据库
-- **基站信息**: Cell ID, LAC, MNC, MCC
-
-#### 应用数据
-- **包名**: Android 应用包名 (com.xxx.xxx)
-- **版本信息**: App 版本号和构建信息
-- **推送 Token**: FCM, 小米推送, 华为推送等 token
-- **广告 ID**: GAID, OAID 等广告标识符
+- User-Agent
 
 ### 扩展功能
 - [x] 支持自定义 regex pattern (通过 --regex 参数)
